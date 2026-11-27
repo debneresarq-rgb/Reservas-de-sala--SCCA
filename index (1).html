@@ -123,6 +123,12 @@ h1.big span{color:var(--or)}
 .tag{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.06em;padding:3px 10px;border-radius:999px;background:#eef1f4;color:#34495e}
 .tag.online{background:#e8f0fe;color:#1a56c4}
 .tag.escritorio{background:#e6f4ea;color:#1e6b34}
+.trow{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px}
+.refresh{border:1px solid var(--bk);background:#fff;border-radius:999px;padding:8px 16px;font-size:12px;font-weight:800;white-space:nowrap}
+.refresh:hover{background:var(--bk);color:#fff}
+.refresh.spin{opacity:.6;pointer-events:none}
+.syncinfo{font-size:12px;color:var(--mut);margin-bottom:14px;min-height:18px}
+.syncinfo.warn{color:var(--err)}
 
 /* 6. Minhas reservas */
 .vtitle{font-size:clamp(2rem,4vw,3.2rem);letter-spacing:-.04em;margin:14px 0 30px;padding-bottom:30px;border-bottom:1px solid var(--bd)}
@@ -211,7 +217,8 @@ h1.big span{color:var(--or)}
           <h2 id="roomTitle"></h2>
           <p class="sub">Escolha o dia e clique em um horário livre.</p>
           <div class="dates" id="dates"></div>
-          <h3 id="dateTitle" style="margin-bottom:14px"></h3>
+          <div class="trow"><h3 id="dateTitle"></h3><button type="button" class="refresh" id="refresh">↻ Atualizar</button></div>
+          <p class="syncinfo" id="syncInfo"></p>
           <div class="times" id="times"></div>
           <div class="legend">
             <span><i style="background:#fff"></i>Livre</span>
@@ -274,6 +281,11 @@ const CONFIG = {
   // Escopo para criar/editar/cancelar eventos. "calendar.events" é o padrão testado.
   // Opção mais restrita (só agendas próprias): "calendar.events.owned" — teste antes de trocar.
   EVENTS_SCOPE: "calendar.events",
+  // Atualização automática da tela (segundos). 0 = desligada (só o botão "Atualizar").
+  REFRESH_SECONDS: 45,
+  // E-mail de confirmação IMEDIATO enviado pela conta de quem reservou (Gmail API).
+  // Exige: ativar a Gmail API no projeto e incluir o escopo gmail.send na tela de consentimento.
+  SEND_CONFIRMATION_EMAIL: false,
   // ID (e-mail) da agenda de cada sala — NÃO é o nome da sala.
   // Formato: "c_abc123...@resource.calendar.google.com". Veja o README para achar o ID.
   // Valores que não forem e-mails são ignorados. Deixe "" para não usar.
@@ -351,7 +363,8 @@ const aErr = m => { $("#aErr").textContent = m; };
 // Permissões pedidas no login (cadastro). Os 3 primeiros identificam a pessoa.
 const SCOPES = ["openid", "email", "profile",
   "https://www.googleapis.com/auth/"+CONFIG.EVENTS_SCOPE,
-  "https://www.googleapis.com/auth/calendar.freebusy"];
+  "https://www.googleapis.com/auth/calendar.freebusy",
+  ...(CONFIG.SEND_CONFIRMATION_EMAIL ? ["https://www.googleapis.com/auth/gmail.send"] : [])];
 
 function initGoogle(){
   if(!(window.google && google.accounts)) return setTimeout(initGoogle, 300);   // aguarda o script do Google
@@ -389,11 +402,11 @@ async function onToken(resp){
 }
 
 $("#logout").onclick = () => { if(token) google.accounts.oauth2.revoke(token, () => {}); token = null; me = null; showAuth(); };
-function showAuth(){ $("#app").hidden = true; $("#auth").hidden = false; }
+function showAuth(){ stopAuto(); $("#app").hidden = true; $("#auth").hidden = false; }
 function showApp(){
   $("#auth").hidden = true; $("#app").hidden = false;
   $("#uName").textContent = nameOf(me); $("#uMail").textContent = me;
-  setView("book"); renderAll();
+  setView("book"); renderAll(); syncAndRender(); startAuto();
   if(Object.keys(CONFIG.ROOM_CALENDARS).some(id => CONFIG.ROOM_CALENDARS[id] && !roomCal(id)))
     toast("ROOM_CALENDARS tem valor que não é e-mail: a agenda da sala foi ignorada. Veja o README.");
 }
@@ -425,31 +438,141 @@ function evBody(b){
   return {summary: "["+r.tag+"] "+b.title, location: r.name,
           description: "Tag: "+r.tag+"\nLocal: "+r.loc+"\nReserva feita pelo sistema de salas da SCC.",
           start: dt(b.start), end: dt(b.start+b.dur), attendees: at,
-          extendedProperties: {private: {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag}}};   // marca d'água do sistema
+          extendedProperties: {   // marca d'água do sistema: "private" só na agenda de quem reservou; "shared" também na agenda da sala
+            private: {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag, sccRoom:b.room},
+            shared:  {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag}}};
 }
 
-// Reservas de OUTRAS pessoas: lê a agenda da sala no dia escolhido.
+/* ---------- Leitura da agenda da sala (reservas de outras pessoas) ---------- */
+let syncState = {mode:"idle"}, mineErr = "";
+const enc = encodeURIComponent;
+const bare = t => (t || "").replace(/^\[(escritorio|online)\]\s*/, "");   // tira a tag do título
+
 // 1) events.list traz título e organizador (se o Workspace permitir ver detalhes);
 // 2) se falhar, freeBusy traz só os horários ocupados.
 async function refreshBusy(){
   const cal = roomCal(room.id), k = busyKey;
-  if(!cal || !token) return;
+  if(!cal || !token){ syncState = {mode:"none"}; renderSyncInfo(); return; }
+  syncState = {mode:"loading"}; renderSyncInfo();
   const d0 = parse(key(day)).getTime(), min = new Date(d0).toISOString(), max = new Date(d0+864e5).toISOString();
   const toMin = x => { const t = new Date(x); return t.getHours()*60+t.getMinutes(); };
-  let list = null;
+  let list = null, mode = "events", err = "";
   try{
-    const r = await gcal("/calendars/"+encodeURIComponent(cal)+"/events?singleEvents=true&orderBy=startTime&timeMin="+encodeURIComponent(min)+"&timeMax="+encodeURIComponent(max));
+    const r = await gcal("/calendars/"+enc(cal)+"/events?singleEvents=true&orderBy=startTime&timeMin="+enc(min)+"&timeMax="+enc(max));
     list = (r.items || [])
       .filter(ev => ev.start?.dateTime && !(ev.attendees || []).some(a => a.self && a.responseStatus === "declined"))
-      .map(ev => ({start: toMin(ev.start.dateTime), end: toMin(ev.end.dateTime) || 1440, title: ev.summary || "", who: ev.organizer?.email || ""}));
+      .map(ev => ({start: toMin(ev.start.dateTime), end: toMin(ev.end.dateTime) || 1440, title: ev.summary || "", who: ev.organizer?.email || "",
+                   bid: ev.extendedProperties?.shared?.sccBookingId || ""}));
   }catch(e){
     try{
       const r = await gcal("/freeBusy", {method:"POST", body: JSON.stringify({timeMin:min, timeMax:max, timeZone:CONFIG.TIMEZONE, items:[{id:cal}]})});
-      list = (r.calendars?.[cal]?.busy || []).map(x => ({start: toMin(x.start), end: toMin(x.end) || 1440, title:"", who:""}));
-    }catch(e2){ toast(e2.message); }
+      list = (r.calendars?.[cal]?.busy || []).map(x => ({start: toMin(x.start), end: toMin(x.end) || 1440, title:"", who:"", bid:""}));
+      mode = "freebusy";
+    }catch(e2){ mode = "error"; err = e2.message; }
   }
-  if(list && busyKey === k){ busy = list; renderTimes(); renderAgenda(); }
+  if(busyKey !== k) return;                       // mudou de sala/dia durante a leitura
+  if(list) busy = list.filter(x => !(x.bid && B.some(b => String(b.id) === x.bid && b.status === "canceled")));   // ignora o que já foi cancelado aqui
+  syncState = {mode, err, at:new Date()};
+  renderTimes(); renderAgenda(); renderSyncInfo();
 }
+
+function renderSyncInfo(){
+  const el = $("#syncInfo"); if(!el) return;
+  const t = syncState.at ? syncState.at.toLocaleTimeString("pt-BR") : "";
+  let msg = "", warn = false;
+  if(!roomCal(room.id)){ msg = "⚠ A agenda desta sala não está configurada (ROOM_CALENDARS): você só vê as reservas feitas por você."; warn = true; }
+  else if(syncState.mode === "loading") msg = "Atualizando…";
+  else if(syncState.mode === "events") msg = "Agenda da sala conectada · atualizado às "+t;
+  else if(syncState.mode === "freebusy") msg = "Mostrando só os horários ocupados (sem acesso aos detalhes) · atualizado às "+t;
+  else if(syncState.mode === "error"){ msg = "⚠ Não foi possível ler a agenda da sala: "+syncState.err; warn = true; }
+  if(mineErr){ msg += (msg ? " · " : "")+"⚠ Falha ao sincronizar suas reservas: "+mineErr; warn = true; }
+  el.textContent = msg; el.classList.toggle("warn", warn);
+}
+
+// Sincroniza SUAS reservas com o Google Agenda nos dois sentidos:
+//  - evento apagado/recusado no Google  -> aqui vira "Cancelada"
+//  - evento do sistema que não existe aqui (outro navegador/aparelho) -> é importado
+// As sincronizações entram numa fila (uma por vez) e só avaliam reservas que já existiam quando a leitura começou
+// (evita marcar como cancelada uma reserva criada no instante em que a atualização automática rodava).
+let syncQ = Promise.resolve();
+const syncMine = () => (syncQ = syncQ.then(syncMineRun, syncMineRun));
+async function syncMineRun(){
+  mineErr = "";
+  const targets = B.filter(x => x.owner===me && x.status==="active" && x.eventId && !ended(x));
+  let evs;
+  try{
+    const r = await gcal("/calendars/primary/events?singleEvents=true&maxResults=250&orderBy=startTime&timeMin="+enc(new Date(Date.now()-2*864e5).toISOString())+"&privateExtendedProperty="+enc("sccApp=room-booking"));
+    evs = r.items || [];
+  }catch(e){ mineErr = e.message; renderSyncInfo(); return; }
+  const byId = new Map(evs.map(e => [e.id, e]));
+  const notes = []; let changed = false;
+  for(const b of targets){
+    if(b.status !== "active") continue;
+    const ev = byId.get(b.eventId);
+    if(!ev || ev.status === "cancelled"){
+      b.status = "canceled"; changed = true;
+      notes.push("“"+b.title+"” foi cancelada no Google Agenda e agora está como Cancelada aqui.");
+    }else if((ev.attendees || []).some(a => a.resource && a.responseStatus === "declined")){
+      try{ await gcal("/calendars/primary/events/"+b.eventId+"?sendUpdates=all", {method:"DELETE"}); }catch(e){}
+      b.status = "canceled"; changed = true;
+      notes.push("A sala recusou “"+b.title+"” (horário já ocupado por outra pessoa). Reserva desfeita.");
+    }
+  }
+  evs.forEach(ev => {
+    if(ev.status === "cancelled" || !ev.start?.dateTime || B.some(b => b.eventId === ev.id)) return;
+    if(!(ev.organizer?.self || ev.creator?.self)) return;
+    const pr = ev.extendedProperties?.private || {};
+    const rm = ROOMS.find(r => r.id === pr.sccRoom) || ROOMS.find(r => r.name === ev.location);
+    if(!rm) return;
+    const s0 = new Date(ev.start.dateTime), e0 = new Date(ev.end.dateTime);
+    B.push({id: Number(pr.sccBookingId) || Date.now()+B.length, room: rm.id, date: key(s0), start: s0.getHours()*60+s0.getMinutes(),
+      dur: Math.round((e0-s0)/60000), title: bare(ev.summary), owner: me, status: "active", eventId: ev.id,
+      guests: [me, ...(ev.attendees || []).filter(a => !a.resource && !a.self).map(a => a.email)]});
+    changed = true;
+  });
+  if(changed) saveB();
+  if(notes.length) toast(notes.join(" "));
+}
+
+async function syncAndRender(){ await syncMine(); renderTimes(); renderAgenda(); renderMine(); renderSyncInfo(); }
+
+// Botão "Atualizar": sincroniza suas reservas e relê a agenda da sala
+async function refreshAll(){
+  if(!token) return;
+  const btn = $("#refresh"); btn.classList.add("spin"); btn.textContent = "Atualizando…";
+  try{ await syncMine(); busyKey = room.id+key(day); await refreshBusy(); renderMine(); }
+  finally{ btn.classList.remove("spin"); btn.textContent = "↻ Atualizar"; }
+}
+$("#refresh").onclick = refreshAll;
+// Depois de criar/editar/cancelar, confere de novo em alguns segundos (o Google leva um instante para propagar)
+const later = () => { setTimeout(refreshAll, 3000); setTimeout(refreshAll, 9000); };
+
+// Atualização automática enquanto a aba estiver aberta e visível
+let autoTimer = null;
+function startAuto(){
+  stopAuto();
+  if(CONFIG.REFRESH_SECONDS > 0) autoTimer = setInterval(() => { if(token && !document.hidden && $("#modal").hidden) refreshAll(); }, CONFIG.REFRESH_SECONDS*1000);
+}
+function stopAuto(){ clearInterval(autoTimer); autoTimer = null; }
+document.addEventListener("visibilitychange", () => { if(!document.hidden && token && $("#modal").hidden) refreshAll(); });
+
+/* ---------- E-mail de confirmação imediato (opcional, via Gmail API) ---------- */
+const b64 = x => btoa(unescape(encodeURIComponent(x)));
+async function sendConfirmation(b, kind){
+  if(!CONFIG.SEND_CONFIRMATION_EMAIL || !b) return;
+  const r = roomOf(b.room), to = [...new Set([me, ...b.guests])].join(", ");
+  const when = fmt(parse(b.date))+", "+hm(b.start)+" – "+hm(b.start+b.dur);
+  const subject = "Reserva "+kind+": ["+r.tag+"] "+b.title+" — "+r.name+", "+when;
+  const body = ["Reserva "+kind+".", "", "Tag: "+r.tag, "Reunião: "+b.title, "Sala: "+r.name+" ("+r.loc+")", "Quando: "+when,
+                "Participantes: "+b.guests.join(", "), "", "O convite do Google Agenda é enviado separadamente."].join("\r\n");
+  const mime = ["To: "+to, "Subject: =?UTF-8?B?"+b64(subject)+"?=", "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8",
+                "Content-Transfer-Encoding: base64", "", b64(body).replace(/.{76}/g, "$&\r\n")].join("\r\n");
+  const raw = b64(mime).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  const resp = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+    {method:"POST", headers:{Authorization:"Bearer "+token, "Content-Type":"application/json"}, body: JSON.stringify({raw})});
+  if(!resp.ok){ const j = await resp.json().catch(() => ({})); throw new Error(j.error?.message || "erro "+resp.status); }
+}
+const notifyMail = (b, kind) => sendConfirmation(b, kind).catch(e => toast("A reserva foi salva, mas o e-mail de confirmação não saiu: "+e.message));
 
 /* ============================================================
    3. RESERVAS
@@ -463,13 +586,15 @@ const today = new Date();
 const days = Array.from({length:7}, (_, i) => { const d = new Date(today); d.setDate(today.getDate()+i); return d; });
 let room = ROOMS[0], day = days[0];
 
+// Reserva local que vale para a disponibilidade: as MINHAS (as dos outros vêm da agenda da sala, se estiver conectada)
+const lb = b => b.status==="active" && (b.owner===me || !roomCal(b.room));
 // O horário t está dentro de alguma reserva ativa desta sala/dia?
 const inBusy = (roomId, date) => roomId===room.id && date===key(day);   // 'busy' vale só para a sala/dia em tela
-const covered = (roomId, date, t) => B.some(b => b.status==="active" && b.room===roomId && b.date===date && b.start<=t && t<b.start+b.dur)
+const covered = (roomId, date, t) => B.some(b => lb(b) && b.room===roomId && b.date===date && b.start<=t && t<b.start+b.dur)
   || (inBusy(roomId, date) && busy.some(x => x.start<=t && t<x.end));
 // Reservar [start, start+dur) colide com outra reserva ativa?
 const conflict = (roomId, date, start, dur, ignoreId) => B.some(b =>
-  b.status==="active" && b.id!==ignoreId && b.room===roomId && b.date===date && b.start<start+dur && start<b.start+b.dur)
+  lb(b) && b.id!==ignoreId && b.room===roomId && b.date===date && b.start<start+dur && start<b.start+b.dur)
   || (!ignoreId && inBusy(roomId, date) && busy.some(x => x.start<start+dur && start<x.end));
 const nowMin = () => { const n = new Date(); return n.getHours()*60+n.getMinutes(); };
 const ended = b => parse(b.date).getTime() + (b.start+b.dur)*60000 < Date.now();
@@ -533,19 +658,22 @@ $("#mForm").onsubmit = async e => {
   if(!title) return;
   if(conflict(M.roomId, M.date, M.start, dur, M.id)){ $("#mErr").textContent = "Este horário acabou de ser reservado."; fillDur(30); return; }
   $("#mOk").disabled = true; $("#mErr").textContent = "";
+  let done = null, kind = "";
   try{
     if(M.id){
       const b = B.find(x => x.id === M.id), nb = {...b, title, dur, guests:M.guests};
       if(b.eventId) await gcal("/calendars/primary/events/"+b.eventId+"?sendUpdates=all", {method:"PATCH", body:JSON.stringify(evBody(nb))});
       Object.assign(b, {title, dur, guests:M.guests});
-      toast("Reserva atualizada. Convidados avisados por e-mail.");
+      done = b; kind = "atualizada";
+      toast("Reserva atualizada. O Google Agenda avisa os convidados (o e-mail pode levar alguns minutos).");
     }else{
-      const nb = {id:Date.now(), room:M.roomId, date:M.date, start:M.start, dur, title, guests:M.guests, owner:me, status:"active"};
+      const nb = {id:Date.now(), room:M.roomId, date:M.date, start:M.start, dur, title, guests:M.guests, owner:me, status:"active", createdAt:Date.now()};
       const ev = await gcal("/calendars/primary/events?sendUpdates=all", {method:"POST", body:JSON.stringify(evBody(nb))});
       nb.eventId = ev.id; B.push(nb);
-      toast("Reserva criada. Convites enviados pelo Google Agenda.");
+      done = nb; kind = "criada";
+      toast("Reserva criada. O Google Agenda envia os convites (podem levar alguns minutos ou cair no spam).");
     }
-    saveB(); closeModal(); busyKey = null; renderAll();
+    saveB(); closeModal(); busyKey = null; renderAll(); later(); notifyMail(done, kind);
   }catch(err){ $("#mErr").textContent = err.message; $("#mOk").disabled = false; }
 };
 
@@ -558,7 +686,7 @@ function setView(v){
   $("#vBook").hidden = v !== "book"; $("#vMine").hidden = v !== "mine";
   document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b.dataset.v === v));
 }
-document.querySelectorAll(".nav button").forEach(b => b.onclick = () => { setView(b.dataset.v); renderAll(); });
+document.querySelectorAll(".nav button").forEach(b => b.onclick = () => { setView(b.dataset.v); renderAll(); if(b.dataset.v === "mine") syncAndRender(); });
 $("#filters").onclick = e => {
   if(!e.target.dataset.f) return;
   filter = e.target.dataset.f;
@@ -614,12 +742,12 @@ function renderTimes(){
 // Agenda do dia: resumo das reservas da sala no dia (as suas + as de outras pessoas, lidas da agenda da sala)
 function renderAgenda(){
   const date = key(day);
-  const local = B.filter(b => b.status==="active" && b.room===room.id && b.date===date)
-    .map(b => ({start:b.start, end:b.start+b.dur, title:b.title, who:b.owner}));
-  const remote = busy.filter(x => !local.some(l => l.start===x.start && l.end===x.end));
+  const local = B.filter(b => lb(b) && b.room===room.id && b.date===date)
+    .map(b => ({id:b.id, start:b.start, end:b.start+b.dur, title:b.title, who:b.owner}));
+  const remote = busy.filter(x => !local.some(l => (x.bid && String(l.id)===x.bid) || (l.start===x.start && l.end===x.end)));
   const all = [...local, ...remote].sort((a,b) => a.start-b.start).map(x => {
-    const m = /^\[(escritorio|online)\]\s*/.exec(x.title || "");           // tira a tag do título (já aparece como etiqueta)
-    return {...x, tag: m ? m[1] : room.tag, title: (x.title || "").replace(/^\[(escritorio|online)\]\s*/, "") || "Ocupado"};
+    const m = /^\[(escritorio|online)\]/.exec(x.title || "");
+    return {...x, tag: m ? m[1] : room.tag, title: bare(x.title) || "Ocupado"};
   });
   $("#aDate").textContent = fmt(day);
   $("#aCount").textContent = all.length ? all.length+(all.length>1?" reservas":" reserva") : "";
@@ -655,7 +783,7 @@ function renderMine(){
             catch(err){ if(err.status !== 404 && err.status !== 410) throw err; }   // já apagado no Google: segue
           }
           // A reserva continua listada, com o selo "Cancelada" (histórico preservado)
-          b.status = "canceled"; saveB(); busyKey = null; renderAll(); toast("Reserva cancelada. Horário liberado.");
+          b.status = "canceled"; saveB(); busyKey = null; renderAll(); toast("Reserva cancelada no site e no Google Agenda. Horário liberado."); later(); notifyMail(b, "cancelada");
         }catch(err){ toast(err.message); }
       };
     }
@@ -666,7 +794,7 @@ function renderMine(){
 function renderAll(){
   const k = room.id+key(day);
   if(k !== busyKey){ busyKey = k; busy = []; refreshBusy(); }   // busca a agenda da sala só se mudou
-  renderRooms(); renderDates(); renderTimes(); renderAgenda(); renderMine();
+  renderRooms(); renderDates(); renderTimes(); renderAgenda(); renderMine(); renderSyncInfo();
 }
 
 /* ============================================================
