@@ -105,8 +105,12 @@ h1.big span{color:var(--or)}
 .slot small{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
 .slot:hover:not(:disabled){background:var(--bk);border-color:var(--bk);color:var(--wh)}
 .slot:hover:not(:disabled) small{color:var(--wh)}
-.slot.booked{background:var(--or);border-color:var(--or);color:var(--bk);cursor:not-allowed}
-.slot.booked small{color:#3f2a0b}
+.slot.booked{background:#ffe38a;border-color:#f2c94c;color:var(--bk);cursor:not-allowed}
+.slot.booked small{color:#5c4400}
+.slot.booked .who{font-weight:700;text-transform:none;letter-spacing:0;font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slot.booked .what{text-transform:none;letter-spacing:0;font-size:11px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slot.booked.mine{background:#f5a623;border-color:#d98b00}
+.slot.booked.mine small{color:#3f2a0b}
 .slot.past{background:#f1f1f1;color:#999;cursor:not-allowed}
 .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:20px;font-size:12px;color:var(--mut)}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px;border:1px solid var(--bd)}
@@ -198,7 +202,6 @@ h1.big span{color:var(--or)}
     <nav class="nav" aria-label="Navegação principal">
       <button type="button" data-v="book" class="active">Reservar</button>
       <button type="button" data-v="mine">Minhas reservas</button>
-      <button type="button" data-v="all">Todas as reservas</button>
     </nav>
     <div class="profile">
       <div class="profile-copy"><strong id="uName"></strong><span id="uMail"></span></div>
@@ -229,7 +232,8 @@ h1.big span{color:var(--or)}
           <div class="times" id="times"></div>
           <div class="legend">
             <span><i style="background:#fff"></i>Livre</span>
-            <span><i style="background:var(--or)"></i>Reservado</span>
+            <span><i style="background:#ffe38a;border-color:#f2c94c"></i>Reservado por outra pessoa</span>
+            <span><i style="background:#f5a623;border-color:#d98b00"></i>Sua reserva</span>
             <span><i style="background:#f1f1f1"></i>Encerrado</span>
           </div>
         </div>
@@ -719,6 +723,13 @@ const covered = (roomId, date, t) => B.some(b => lb(b) && b.room===roomId && b.d
 const conflict = (roomId, date, start, dur, ignoreId) => B.some(b =>
   lb(b) && b.id!==ignoreId && b.room===roomId && b.date===date && b.start<start+dur && start<b.start+b.dur)
   || (!ignoreId && inBusy(roomId, date) && busy.some(x => x.start<start+dur && start<x.end));
+// Quem ocupa o horário t (sala/dia em tela): {title, who, mine} ou null
+function slotInfo(roomId, date, t){
+  const l = B.find(b => lb(b) && b.room===roomId && b.date===date && b.start<=t && t<b.start+b.dur);
+  if(l) return {title:l.title, who:l.owner, mine:(l.owner||"").toLowerCase()===(me||"").toLowerCase()};
+  const x = inBusy(roomId, date) && busy.find(x => x.start<=t && t<x.end);
+  return x ? {title:bare(x.title), who:x.who, mine:!!x.who && x.who.toLowerCase()===(me||"").toLowerCase()} : null;
+}
 const nowMin = () => { const n = new Date(); return n.getHours()*60+n.getMinutes(); };
 const ended = b => parse(b.date).getTime() + (b.start+b.dur)*60000 < Date.now();
 const roomOf = id => ROOMS.find(r => r.id === id);
@@ -863,8 +874,11 @@ function renderTimes(){
     const past = key(day)===key(today) && t <= nowMin();
     const b = document.createElement("button");
     b.type = "button"; b.disabled = booked || past;
-    b.className = "slot"+(booked?" booked":"")+(past&&!booked?" past":"");
-    b.innerHTML = `<strong>${hm(t)}</strong><small>${booked?"Reservado":past?"Encerrado":"Livre"}</small>`;
+    const si = booked ? slotInfo(room.id, key(day), t) : null;
+    b.className = "slot"+(booked?" booked":"")+(si?.mine?" mine":"")+(past&&!booked?" past":"");
+    b.innerHTML = `<strong>${hm(t)}</strong><small>${booked ? (si?.mine ? "Sua reserva" : "Reservado") : past?"Encerrado":"Livre"}</small>`
+      + (booked ? (si?.who && !si.mine ? `<small class="who">${esc(nameOf(si.who))}</small>` : "") + (si?.title ? `<small class="what">${esc(si.title)}</small>` : "") : "");
+    if(booked) b.title = [si?.title, si?.who ? "por "+nameOf(si.who) : ""].filter(Boolean).join(" ");
     if(!b.disabled) b.onclick = () => openModal({roomId:room.id, date:key(day), start:t});
     $("#times").appendChild(b);
   }
