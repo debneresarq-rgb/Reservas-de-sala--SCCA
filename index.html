@@ -123,6 +123,7 @@ h1.big span{color:var(--or)}
 .tag{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.06em;padding:3px 10px;border-radius:999px;background:#eef1f4;color:#34495e}
 .tag.online{background:#e8f0fe;color:#1a56c4}
 .tag.escritorio{background:#e6f4ea;color:#1e6b34}
+.dayh{font-size:1rem;margin:22px 0 4px}
 .trow{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px}
 .refresh{border:1px solid var(--bk);background:#fff;border-radius:999px;padding:8px 16px;font-size:12px;font-weight:800;white-space:nowrap}
 .refresh:hover{background:var(--bk);color:#fff}
@@ -178,9 +179,14 @@ h1.big span{color:var(--or)}
   <div class="acard">
     <img id="logoA" alt="SCCA">
     <h1>Reserva de salas</h1>
-    <p class="sub">Acesso restrito a contas <strong>@scca.com.br</strong>.</p>
+    <p class="sub" id="authNote">Acesso restrito a contas <strong>@scca.com.br</strong>.</p>
     <p class="sub" style="margin-top:-8px">Ao entrar, o Google pedirá permissão para o sistema criar, alterar e cancelar os eventos das reservas feitas por ele e consultar a disponibilidade das salas.</p>
     <button type="button" class="gbtn" id="gBtn">Entrar com o Google</button>
+    <div id="localBox" style="margin-top:18px;border-top:1px solid #ddd;padding-top:16px">
+      <p class="sub" style="margin:0 0 8px"><strong>Sem conseguir entrar?</strong> Use o modo local: não precisa de login do Google. As reservas ficam só neste navegador (não vão para o Google Agenda e outras pessoas não as veem).</p>
+      <input id="lMail" type="email" placeholder="seu e-mail (para identificar a reserva)" style="width:100%;padding:10px;margin-bottom:8px;box-sizing:border-box">
+      <button type="button" class="gbtn" id="lBtn">Entrar sem Google (modo local)</button>
+    </div>
     <p class="err" id="aErr" role="alert" style="margin-top:14px"></p>
   </div>
 </section>
@@ -192,6 +198,7 @@ h1.big span{color:var(--or)}
     <nav class="nav" aria-label="Navegação principal">
       <button type="button" data-v="book" class="active">Reservar</button>
       <button type="button" data-v="mine">Minhas reservas</button>
+      <button type="button" data-v="all">Todas as reservas</button>
     </nav>
     <div class="profile">
       <div class="profile-copy"><strong id="uName"></strong><span id="uMail"></span></div>
@@ -246,6 +253,14 @@ h1.big span{color:var(--or)}
       </div>
       <div id="mine"></div>
     </section>
+
+    <!-- Aba: Todas as reservas (lidas das agendas das salas) -->
+    <section id="vAll" hidden>
+      <p class="eyebrow">Visão geral</p>
+      <h1 class="vtitle">Todas as reservas</h1>
+      <div class="trow"><p class="syncinfo" id="allInfo" style="margin:0"></p><button type="button" class="refresh" id="refreshAll2">↻ Atualizar</button></div>
+      <div id="allList"></div>
+    </section>
   </main>
 </div>
 
@@ -275,7 +290,7 @@ h1.big span{color:var(--or)}
 <script>
 const CONFIG = {
   // ID do cliente OAuth criado no Google Cloud Console (tipo "Aplicativo da Web")
-  CLIENT_ID: "1082946275616-lp2p23gs6l7khlblqgpb8h44f2kubtdd.apps.googleusercontent.com",
+  CLIENT_ID: "794292659973-jdm8fme6db4p5fsg7maeghgstddb7334.apps.googleusercontent.com",
   DOMAIN: "scca.com.br",
   TIMEZONE: "America/Sao_Paulo",
   // Escopo para criar/editar/cancelar eventos. "calendar.events" é o padrão testado.
@@ -283,11 +298,19 @@ const CONFIG = {
   EVENTS_SCOPE: "calendar.events",
   // Atualização automática da tela (segundos). 0 = desligada (só o botão "Atualizar").
   REFRESH_SECONDS: 45,
+  // ACESSO TEMPORÁRIO: true = qualquer conta Google pode entrar. Volte para false quando terminar os testes.
+  // (A tela "Acesso bloqueado / 403 access_denied" do Google NÃO depende deste valor: veja o README.)
+  ALLOW_ANY_EMAIL: true,
+  // true = mostra o botão "Entrar sem Google" (modo local): sem login, sem Google Agenda, reservas só neste navegador.
+  ALLOW_LOCAL_MODE: true,
+  // true = quem for convidado do evento também pode alterar horário e participantes no Google Agenda.
+  GUESTS_CAN_MODIFY: true,
   // E-mail de confirmação IMEDIATO enviado pela conta de quem reservou (Gmail API).
   // Exige: ativar a Gmail API no projeto e incluir o escopo gmail.send na tela de consentimento.
   SEND_CONFIRMATION_EMAIL: false,
-  // ID (e-mail) da agenda de cada sala — NÃO é o nome da sala.
-  // Formato: "c_abc123...@resource.calendar.google.com". Veja o README para achar o ID.
+  // ID da agenda de cada sala — NÃO é o nome da sala. Dois formatos aceitos (veja o README):
+  //  - agenda COMPARTILHADA criada por você no Google Agenda: "xxxx@group.calendar.google.com" (sem administrador);
+  //  - recurso de sala do Workspace: "c_xxxx@resource.calendar.google.com" (exige administrador).
   // Valores que não forem e-mails são ignorados. Deixe "" para não usar.
   ROOM_CALENDARS: { scca: "", jb: "", lagoa: "" }
 };
@@ -372,7 +395,7 @@ function initGoogle(){
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CONFIG.CLIENT_ID,
     scope: SCOPES.join(" "),
-    hd: CONFIG.DOMAIN,          // apenas sugere o domínio na tela do Google
+    ...(CONFIG.ALLOW_ANY_EMAIL ? {} : {hd: CONFIG.DOMAIN}),   // sugere o domínio na tela do Google (só no modo restrito)
     callback: onToken
   });
 }
@@ -380,6 +403,14 @@ $("#gBtn").onclick = () => {
   aErr("");
   if(tokenClient) tokenClient.requestAccessToken();
   else aErr("Google ainda carregando ou CLIENT_ID não configurado.");
+};
+
+$("#localBox").hidden = !CONFIG.ALLOW_LOCAL_MODE;
+$("#lBtn").onclick = () => {
+  const m = ($("#lMail").value || "").trim().toLowerCase();
+  if(!isMail(m)) return aErr("Digite um e-mail válido para entrar no modo local.");
+  token = null; me = m; showApp();
+  toast("Modo local: as reservas ficam só neste navegador e não vão para o Google Agenda.");
 };
 
 async function onToken(resp){
@@ -393,7 +424,7 @@ async function onToken(resp){
   try{
     const r = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {headers:{Authorization:"Bearer "+token}});
     const u = await r.json(), email = (u.email || "").toLowerCase();
-    if(!isCorp(email) || u.email_verified === false){
+    if(!(CONFIG.ALLOW_ANY_EMAIL ? isMail(email) : isCorp(email)) || u.email_verified === false){
       google.accounts.oauth2.revoke(token, () => {}); token = null;
       return aErr("Só contas "+DOMAIN+" podem entrar.");
     }
@@ -426,21 +457,23 @@ async function gcal(path, opt = {}){
 
 // ID da agenda da sala, só se for um e-mail válido (nomes como "SALA SCCA" são ignorados)
 function roomCal(id){ const v = (CONFIG.ROOM_CALENDARS[id] || "").trim(); return /^[^\s@]+@[^\s@]+$/.test(v) ? v : ""; }
+// "resource": recurso de sala do Workspace (entra como convidado) | "shared": agenda compartilhada (o evento é criado direto nela) | "none"
+const roomMode = id => { const c = roomCal(id); return !c ? "none" : /@resource\.calendar\.google\.com$/i.test(c) ? "resource" : "shared"; };
 
 // Monta o evento. Os convidados recebem o convite por e-mail do próprio Google Agenda.
 // TAG: o Google Agenda não tem "etiquetas", então a tag vai entre colchetes no TÍTULO
 // (aparece no assunto e no corpo do e-mail de convite) e também na descrição.
 function evBody(b){
-  const cal = roomCal(b.room), r = roomOf(b.room);
-  const at = b.guests.filter(g => g !== me).map(email => ({email}));
-  if(cal) at.push({email: cal, resource: true});      // a sala entra como convidada
+  const cal = roomCal(b.room), r = roomOf(b.room), mode = roomMode(b.room);
+  // no modo compartilhado quem reserva também é convidado (recebe o convite e vê o evento na própria agenda)
+  const at = (mode === "shared" ? b.guests : b.guests.filter(g => g !== me)).map(email => ({email}));
+  if(mode === "resource") at.push({email: cal, resource: true});
   const dt = m => ({dateTime: b.date+"T"+hm(m)+":00", timeZone: CONFIG.TIMEZONE});
+  const props = {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag, sccRoom:b.room, sccOwner:b.owner || me};
   return {summary: "["+r.tag+"] "+b.title, location: r.name,
           description: "Tag: "+r.tag+"\nLocal: "+r.loc+"\nReserva feita pelo sistema de salas da SCC.",
-          start: dt(b.start), end: dt(b.start+b.dur), attendees: at,
-          extendedProperties: {   // marca d'água do sistema: "private" só na agenda de quem reservou; "shared" também na agenda da sala
-            private: {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag, sccRoom:b.room},
-            shared:  {sccApp:"room-booking", sccBookingId:String(b.id), sccTag:r.tag}}};
+          start: dt(b.start), end: dt(b.start+b.dur), attendees: at, guestsCanModify: !!CONFIG.GUESTS_CAN_MODIFY,
+          extendedProperties: {private: props, shared: props}};   // marca d'água do sistema
 }
 
 /* ---------- Leitura da agenda da sala (reservas de outras pessoas) ---------- */
@@ -461,7 +494,7 @@ async function refreshBusy(){
     const r = await gcal("/calendars/"+enc(cal)+"/events?singleEvents=true&orderBy=startTime&timeMin="+enc(min)+"&timeMax="+enc(max));
     list = (r.items || [])
       .filter(ev => ev.start?.dateTime && !(ev.attendees || []).some(a => a.self && a.responseStatus === "declined"))
-      .map(ev => ({start: toMin(ev.start.dateTime), end: toMin(ev.end.dateTime) || 1440, title: ev.summary || "", who: ev.organizer?.email || "",
+      .map(ev => ({start: toMin(ev.start.dateTime), end: toMin(ev.end.dateTime) || 1440, title: ev.summary || "", who: ev.extendedProperties?.shared?.sccOwner || ev.creator?.email || ev.organizer?.email || "",
                    bid: ev.extendedProperties?.shared?.sccBookingId || ""}));
   }catch(e){
     try{
@@ -497,41 +530,131 @@ function renderSyncInfo(){
 let syncQ = Promise.resolve();
 const syncMine = () => (syncQ = syncQ.then(syncMineRun, syncMineRun));
 async function syncMineRun(){
-  mineErr = "";
+  mineErr = ""; if(!token) return;
   const targets = B.filter(x => x.owner===me && x.status==="active" && x.eventId && !ended(x));
-  let evs;
+  const base = "?singleEvents=true&maxResults=250&orderBy=startTime&timeMin="+enc(new Date(Date.now()-2*864e5).toISOString());
+  const evs = [];
   try{
-    const r = await gcal("/calendars/primary/events?singleEvents=true&maxResults=250&orderBy=startTime&timeMin="+enc(new Date(Date.now()-2*864e5).toISOString())+"&privateExtendedProperty="+enc("sccApp=room-booking"));
-    evs = r.items || [];
+    const mine = await gcal("/calendars/primary/events"+base+"&privateExtendedProperty="+enc("sccApp=room-booking"));
+    (mine.items || []).forEach(ev => evs.push({...ev, _cal:"primary"}));
+    for(const r of ROOMS.filter(r => roomMode(r.id) === "shared")){
+      const cal = roomCal(r.id);
+      const x = await gcal("/calendars/"+enc(cal)+"/events"+base+"&sharedExtendedProperty="+enc("sccOwner="+me));
+      (x.items || []).forEach(ev => evs.push({...ev, _cal:cal}));
+    }
   }catch(e){ mineErr = e.message; renderSyncInfo(); return; }
   const byId = new Map(evs.map(e => [e.id, e]));
   const notes = []; let changed = false;
+  const lower = a => [...new Set(a.map(x => x.toLowerCase()))];
+  const guestsOf = (ev, b) => lower([b.owner, ...(ev.attendees || []).filter(a => !a.resource).map(a => a.email)]);
+  const evPath = b => "/calendars/"+enc(b.cal || "primary")+"/events/"+b.eventId+"?sendUpdates=all";
   for(const b of targets){
     if(b.status !== "active") continue;
     const ev = byId.get(b.eventId);
+    // 1) apagada no Google -> Cancelada aqui
     if(!ev || ev.status === "cancelled"){
       b.status = "canceled"; changed = true;
       notes.push("“"+b.title+"” foi cancelada no Google Agenda e agora está como Cancelada aqui.");
-    }else if((ev.attendees || []).some(a => a.resource && a.responseStatus === "declined")){
-      try{ await gcal("/calendars/primary/events/"+b.eventId+"?sendUpdates=all", {method:"DELETE"}); }catch(e){}
-      b.status = "canceled"; changed = true;
-      notes.push("A sala recusou “"+b.title+"” (horário já ocupado por outra pessoa). Reserva desfeita.");
+      continue;
+    }
+    // 2) a sala (recurso) recusou
+    const rs = (ev.attendees || []).find(a => a.resource);
+    if(rs?.responseStatus === "accepted") b.roomOk = true;
+    if(rs?.responseStatus === "declined"){
+      if(b.roomOk){   // já tinha sido aceita: é uma alteração de horário que conflita; não apaga, só avisa
+        if(!b.warned){ b.warned = true; changed = true; notes.push("A sala recusou a alteração de “"+b.title+"” (horário já ocupado). Ajuste o horário no Google Agenda ou cancele a reserva."); }
+      }else{          // nunca foi aceita: outra pessoa reservou antes; desfaz
+        try{ await gcal(evPath(b), {method:"DELETE"}); }catch(e){}
+        b.status = "canceled"; changed = true;
+        notes.push("A sala recusou “"+b.title+"” (horário já ocupado por outra pessoa). Reserva desfeita.");
+      }
+      continue;
+    }
+    // 3) alterada no Google (horário, título, participantes) -> atualiza aqui
+    if(ev.start?.dateTime){
+      const s0 = new Date(ev.start.dateTime), e0 = new Date(ev.end.dateTime);
+      const nb = {date:key(s0), start:s0.getHours()*60+s0.getMinutes(), dur:Math.round((e0-s0)/60000), title:bare(ev.summary) || b.title};
+      const ng = guestsOf(ev, b);
+      if(nb.date!==b.date || nb.start!==b.start || nb.dur!==b.dur || nb.title!==b.title || [...ng].sort().join() !== lower(b.guests).sort().join()){
+        Object.assign(b, nb, {guests:ng, warned:false}); changed = true;
+        notes.push("“"+b.title+"” foi alterada no Google Agenda; atualizei aqui.");
+      }
     }
   }
+  // 4) reservas suas que não existem aqui (outro navegador ou aparelho) -> importa
   evs.forEach(ev => {
     if(ev.status === "cancelled" || !ev.start?.dateTime || B.some(b => b.eventId === ev.id)) return;
-    if(!(ev.organizer?.self || ev.creator?.self)) return;
-    const pr = ev.extendedProperties?.private || {};
+    const pr = {...(ev.extendedProperties?.private || {}), ...(ev.extendedProperties?.shared || {})};
+    if((pr.sccOwner || (ev.organizer?.self ? me : "")) !== me) return;
     const rm = ROOMS.find(r => r.id === pr.sccRoom) || ROOMS.find(r => r.name === ev.location);
     if(!rm) return;
     const s0 = new Date(ev.start.dateTime), e0 = new Date(ev.end.dateTime);
     B.push({id: Number(pr.sccBookingId) || Date.now()+B.length, room: rm.id, date: key(s0), start: s0.getHours()*60+s0.getMinutes(),
-      dur: Math.round((e0-s0)/60000), title: bare(ev.summary), owner: me, status: "active", eventId: ev.id,
-      guests: [me, ...(ev.attendees || []).filter(a => !a.resource && !a.self).map(a => a.email)]});
+      dur: Math.round((e0-s0)/60000), title: bare(ev.summary), owner: me, status: "active", eventId: ev.id, cal: ev._cal, guests: guestsOf(ev, {owner:me})});
     changed = true;
   });
   if(changed) saveB();
   if(notes.length) toast(notes.join(" "));
+}
+
+/* ---------- Agenda compartilhada: evita reserva dupla ---------- */
+// Eventos da agenda da sala que se sobrepõem ao intervalo pedido
+async function sharedConflict(calId, date, start, dur, ignoreId){
+  const d0 = parse(date).getTime();
+  const r = await gcal("/calendars/"+enc(calId)+"/events?singleEvents=true&timeMin="+enc(new Date(d0).toISOString())+"&timeMax="+enc(new Date(d0+864e5).toISOString()));
+  const toMin = x => { const t = new Date(x); return t.getHours()*60+t.getMinutes(); };
+  return (r.items || []).filter(ev => ev.id !== ignoreId && ev.start?.dateTime)
+    .map(ev => ({ev, s: toMin(ev.start.dateTime), e: toMin(ev.end.dateTime) || 1440}))
+    .filter(x => x.s < start+dur && start < x.e);
+}
+// Antes de salvar: confere na agenda compartilhada se o horário ainda está livre
+async function ensureFree(roomId, date, start, dur, ignoreEventId){
+  if(roomMode(roomId) !== "shared") return;
+  const c = await sharedConflict(roomCal(roomId), date, start, dur, ignoreEventId);
+  if(c.length) throw new Error("Este horário já está ocupado por “"+(bare(c[0].ev.summary) || "outra reserva")+"”. Clique em Atualizar e escolha outro.");
+}
+// Depois de criar: se duas pessoas reservaram juntas, vale a que foi criada primeiro
+async function arbitrate(nb, ev){
+  const others = await sharedConflict(nb.cal, nb.date, nb.start, nb.dur, ev.id);
+  const lose = others.some(x => (x.ev.created || "") < (ev.created || "") || ((x.ev.created || "") === (ev.created || "") && x.ev.id < ev.id));
+  if(lose){
+    try{ await gcal("/calendars/"+enc(nb.cal)+"/events/"+ev.id+"?sendUpdates=all", {method:"DELETE"}); }catch(e){}
+    throw new Error("Outra pessoa reservou este horário um instante antes. Sua reserva foi desfeita; escolha outro horário.");
+  }
+}
+
+/* ---------- Aba "Todas as reservas" ---------- */
+async function loadAll(){
+  if(!token){ $("#allInfo").textContent = "Modo local: entre com o Google para ver as reservas de todos."; return; }
+  const info = $("#allInfo"), box = $("#allList");
+  info.textContent = "Carregando…"; info.classList.remove("warn");
+  const d0 = new Date(); d0.setHours(0,0,0,0);
+  const min = d0.toISOString(), max = new Date(d0.getTime()+14*864e5).toISOString();
+  const rows = [], problems = [];
+  for(const r of ROOMS){
+    const cal = roomCal(r.id);
+    if(!cal){ problems.push(r.name+": agenda não configurada"); continue; }
+    try{
+      const x = await gcal("/calendars/"+enc(cal)+"/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin="+enc(min)+"&timeMax="+enc(max));
+      (x.items || []).filter(ev => ev.start?.dateTime && !(ev.attendees || []).some(a => a.self && a.responseStatus === "declined"))
+        .forEach(ev => rows.push({room:r, s:new Date(ev.start.dateTime), e:new Date(ev.end.dateTime), title:ev.summary || "",
+          who: ev.extendedProperties?.shared?.sccOwner || ev.creator?.email || ev.organizer?.email || ""}));
+    }catch(e){ problems.push(r.name+": "+e.message); }
+  }
+  B.filter(b => b.owner===me && b.status==="active" && !roomCal(b.room) && !ended(b)).forEach(b => {
+    const t0 = parse(b.date).getTime();
+    rows.push({room:roomOf(b.room), s:new Date(t0+b.start*60000), e:new Date(t0+(b.start+b.dur)*60000), title:b.title, who:b.owner});
+  });
+  rows.sort((a, b) => a.s - b.s);
+  const mm = d => d.getHours()*60+d.getMinutes();
+  box.innerHTML = rows.length ? [...new Set(rows.map(x => key(x.s)))].map(k => `<h3 class="dayh">${fmt(parse(k))}</h3>` +
+    rows.filter(x => key(x.s) === k).map(x => {
+      const m = /^\[(escritorio|online)\]/.exec(x.title), tag = m ? m[1] : x.room.tag;
+      return `<div class="item"><span class="pill">${hm(mm(x.s))} – ${hm(mm(x.e) || 1440)}</span> <span class="tag ${tag}">${tag}</span>
+        <strong>${esc(bare(x.title) || "Ocupado")}</strong><small>${esc(x.room.name)}${x.who ? " · "+esc(nameOf(x.who)) : ""}</small></div>`;
+    }).join("")).join("") : '<p class="empty">Nenhuma reserva nos próximos 14 dias.</p>';
+  info.textContent = rows.length+" reserva"+(rows.length === 1 ? "" : "s")+" nos próximos 14 dias"+(problems.length ? " · ⚠ "+problems.join(" · ") : "");
+  info.classList.toggle("warn", problems.length > 0);
 }
 
 async function syncAndRender(){ await syncMine(); renderTimes(); renderAgenda(); renderMine(); renderSyncInfo(); }
@@ -662,16 +785,24 @@ $("#mForm").onsubmit = async e => {
   try{
     if(M.id){
       const b = B.find(x => x.id === M.id), nb = {...b, title, dur, guests:M.guests};
-      if(b.eventId) await gcal("/calendars/primary/events/"+b.eventId+"?sendUpdates=all", {method:"PATCH", body:JSON.stringify(evBody(nb))});
+      if(token) await ensureFree(b.room, b.date, b.start, dur, b.eventId);
+      if(b.eventId && token) await gcal("/calendars/"+enc(b.cal || "primary")+"/events/"+b.eventId+"?sendUpdates=all", {method:"PATCH", body:JSON.stringify(evBody(nb))});
       Object.assign(b, {title, dur, guests:M.guests});
       done = b; kind = "atualizada";
       toast("Reserva atualizada. O Google Agenda avisa os convidados (o e-mail pode levar alguns minutos).");
     }else{
       const nb = {id:Date.now(), room:M.roomId, date:M.date, start:M.start, dur, title, guests:M.guests, owner:me, status:"active", createdAt:Date.now()};
-      const ev = await gcal("/calendars/primary/events?sendUpdates=all", {method:"POST", body:JSON.stringify(evBody(nb))});
-      nb.eventId = ev.id; B.push(nb);
+      if(token){
+        await ensureFree(nb.room, nb.date, nb.start, dur);
+        const calId = roomMode(nb.room) === "shared" ? roomCal(nb.room) : "primary";
+        const ev = await gcal("/calendars/"+enc(calId)+"/events?sendUpdates=all", {method:"POST", body:JSON.stringify(evBody(nb))});
+        nb.cal = calId;
+        if(calId !== "primary") await arbitrate(nb, ev);
+        nb.eventId = ev.id;
+      }
+      B.push(nb);
       done = nb; kind = "criada";
-      toast("Reserva criada. O Google Agenda envia os convites (podem levar alguns minutos ou cair no spam).");
+      toast(token ? "Reserva criada. O Google Agenda envia os convites (podem levar alguns minutos ou cair no spam)." : "Reserva criada (modo local, só neste navegador).");
     }
     saveB(); closeModal(); busyKey = null; renderAll(); later(); notifyMail(done, kind);
   }catch(err){ $("#mErr").textContent = err.message; $("#mOk").disabled = false; }
@@ -683,10 +814,10 @@ $("#mForm").onsubmit = async e => {
 let filter = "all";
 
 function setView(v){
-  $("#vBook").hidden = v !== "book"; $("#vMine").hidden = v !== "mine";
+  $("#vBook").hidden = v !== "book"; $("#vMine").hidden = v !== "mine"; $("#vAll").hidden = v !== "all";
   document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b.dataset.v === v));
 }
-document.querySelectorAll(".nav button").forEach(b => b.onclick = () => { setView(b.dataset.v); renderAll(); if(b.dataset.v === "mine") syncAndRender(); });
+document.querySelectorAll(".nav button").forEach(b => b.onclick = () => { setView(b.dataset.v); renderAll(); if(b.dataset.v === "mine") syncAndRender(); if(b.dataset.v === "all") loadAll(); });
 $("#filters").onclick = e => {
   if(!e.target.dataset.f) return;
   filter = e.target.dataset.f;
@@ -778,8 +909,8 @@ function renderMine(){
       el.querySelector(".cancel").onclick = async () => {
         if(!confirm("Cancelar esta reserva? O horário será liberado e os convidados avisados.")) return;
         try{
-          if(b.eventId){
-            try{ await gcal("/calendars/primary/events/"+b.eventId+"?sendUpdates=all", {method:"DELETE"}); }
+          if(b.eventId && token){
+            try{ await gcal("/calendars/"+enc(b.cal || "primary")+"/events/"+b.eventId+"?sendUpdates=all", {method:"DELETE"}); }
             catch(err){ if(err.status !== 404 && err.status !== 410) throw err; }   // já apagado no Google: segue
           }
           // A reserva continua listada, com o selo "Cancelada" (histórico preservado)
@@ -801,6 +932,8 @@ function renderAll(){
    6. INICIALIZAÇÃO
    ============================================================ */
 $("#logo").src = IMG.logo; $("#logoA").src = IMG.logo;
+$("#authNote").innerHTML = CONFIG.ALLOW_ANY_EMAIL ? "⚠ <strong>Modo de teste:</strong> qualquer conta Google pode entrar." : "Acesso restrito a contas <strong>"+DOMAIN+"</strong>.";
+$("#refreshAll2").onclick = loadAll;
 showAuth();
 initGoogle();
 </script>
